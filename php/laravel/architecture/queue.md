@@ -1,25 +1,24 @@
 # Queue
 
 ## When To Use Queue
+
 - When you have a task that needs to run in the background such as ProcessPayment, GenerateInvoice etc... to reduce stress on server and requests would be quick and delegate the task to background
 
 ## Set Queue Connection
-- QUEUE_CONNECTION=database
-- QUEUE_CONNECTION=redis
-- config/queue.php
 
+- you can review config/queue.php
+- in .env .. set QUEUE_CONNECTION=database or QUEUE_CONNECTION=redis
+- then in .env set DB_QUEUE_CONNECTION=mysql or DB_QUEUE_CONNECTION=pgsql etc..
 
 ## Migrate Queue Structure in database
+
 - `php artisan queue:table`
 - `php artisan queue:failed-table`
 - `php artisan migrate`
 
-
-
 ## Create Job
 
 `php artisan make:job SendWelcomeEmail`
-
 
 ```php
 
@@ -27,31 +26,25 @@
 class SendWelcomeEmail implements ShouldQueue //ShouldQueue Interface “Don’t run this job immediately — push it to the queue.”
 {
     //This trait adds dispatch static method, SendWelcomeEmail::dispatch() instead of dispatch(new SendWelcomeEmail($user));
-    use Dispatchable, 
+    use Dispatchable,
 
     // This trait adds helper methods for when your job is being processed by the queue worker
-    // $this->release(30); // Requeue the job to try again after 30 seconds 
+    // $this->release(30); // Requeue the job to try again after 30 seconds
     // $this->delete();    // Manually delete the job
     // $this->fail($exception); // Mark it as failed
     // Useful when You want to retry later if an API call failed
     // Useful when you want to fail it maybe at specific point
-    InteractsWithQueue, 
-
-    // This trait gives your job access to all queue configuration options
-    // public $tries = 5;
-    // public $timeout = 120;
-    //also
-    //SendWelcomeEmail::dispatch($user)
-    // ->onQueue('emails')     // use custom queue
-    // ->delay(now()->addMinutes(5))  // run later
-    // ->onConnection('redis'); // use Redis instead of default
-    // So it gives jobs flexibility in where and how they’re queued.
-    Queueable, 
-
+    InteractsWithQueue,
 
     // this trait tells Laravel: “Store only the model’s ID when serializing, and automatically re-fetch it from the database when the job runs.”
     // if you dont use the trait laravel would try to serialize all eloquent model properties and relationships .. takes too much data
-    SerializesModels;
+    // to use this, parameter passed in the constructor must be a property of the class
+    // so if public function __construct(User $user) {} .. won't work
+    //serializing is about to serialize class and its properties, without this trait it will serialize all properties data with all its relations which consume queue space
+    SerializesModels,
+
+    // This trait is just the three traits above
+    Queueable,
 
     public function __construct(public User $user) {}
 
@@ -63,7 +56,6 @@ class SendWelcomeEmail implements ShouldQueue //ShouldQueue Interface “Don’t
 
 ```
 
-
 ## What can be put into queue?
 
 - Jobs .. the most common thing you push to a queue.
@@ -71,7 +63,144 @@ class SendWelcomeEmail implements ShouldQueue //ShouldQueue Interface “Don’t
 - Mailables.. call ->queue() instead of ->send() `Mail::to($user)->queue(new WelcomeMail($user));`
 - Notifications (that ShouldQueue)
 
+## Queued Job workflow
 
+- when job is added to queue by TestJob::dispatch()
+
+  ```json
+  {
+    "id": 101,
+    "queue": "default",
+    "payload": "{\"uuid\":\"9d1b54a2...\",\"displayName\":\"App\\\\Jobs\\\\TestJob\",\"job\":\"Illuminate\\\\Queue\\\\CallQueuedHandler@call\",\"data\":{...}}",
+    "attempts": 0,
+    "reserved_at": null,
+    "available_at": 1714742400,
+    "created_at": 1714742400
+  }
+  ```
+
+- when job is picked from queue .. it will straight away mark it as reserved_at and increment attempts in db
+  - so inside job for first trial if you called $this->attempts() it will give you 1
+
+    ```json
+    {
+      "id": 101,
+      "queue": "default",
+      "payload": "{\"uuid\":\"9d1b54a2...\",\"displayName\":\"App\\\\Jobs\\\\TestJob\",\"job\":\"Illuminate\\\\Queue\\\\CallQueuedHandler@call\",\"data\":{...}}",
+      "attempts": 1,
+      "reserved_at": 1714742500,
+      "available_at": 1714742400,
+      "created_at": 1714742400
+    }
+    ```
+
+- if job succeeded, it will delete the record from jobs database (Happy Scenario)
+
+- if job failed with exception, it will move the record into failed_jobs table because by default tries = 1
+
+- if job failed with exception but job had more trials declared with it. after it fails it will set reserved_at as null and keep attempts incremented
+  till attempts >= trials then it will move it to failed_jobs
+
+  ```php
+  class TestJob implements ShouldQueue
+  {
+      use Queueable;
+
+      public $tries = 5;
+  }
+  ```
+
+  ```json
+  {
+    "id": 101,
+    "queue": "default",
+    "payload": "{\"uuid\":\"9d1b54a2...\",\"displayName\":\"App\\\\Jobs\\\\TestJob\",\"job\":\"Illuminate\\\\Queue\\\\CallQueuedHandler@call\",\"data\":{...}}",
+    "attempts": 3,
+    "reserved_at": null,
+    "available_at": 1714742400,
+    "created_at": 1714742400
+  }
+  ```
+
+- if job failed with exception but job had more trials declared with it with back off. after exception happens, it mark reserved_at as null
+  and update available_at to respect backoff value
+
+  ```php
+  class TestJob implements ShouldQueue
+  {
+      use Queueable;
+
+      public $tries = 5;
+
+      public $backoff = 30; //notice its backoff not backOff
+  }
+  ```
+
+  ```json
+  {
+    "id": 101,
+    "queue": "default",
+    "payload": "{\"uuid\":\"9d1b54a2...\",\"displayName\":\"App\\\\Jobs\\\\TestJob\",\"job\":\"Illuminate\\\\Queue\\\\CallQueuedHandler@call\",\"data\":{...}}",
+    "attempts": 1,
+    "reserved_at": null,
+    "available_at": 1777812497,
+    "created_at": 1777812467
+  }
+  ```
+
+- if something fatal caused the queue:work process to exist such as below, reserved_at will have a value
+  and queue worker will use the value of retry_after in config/queue.php that after this time of reserving a job. worker will retry it
+  and notice because of this retry after functionality, its not desired that you have long running jobs
+  - server is down
+  - one of the jobs called `exit`
+  - one of the commands caused memory limit exception
+  - queue worker has lost connection to database
+  - Notice: this won't cause fatal exist of queue:work (typical exceptions and errors in jobs 1/0 or file syntax error )
+
+- if you called $this->release(30) and return normally. just by calling $this->release(30) it will action straight away
+  setting reserved_at with null and update available_at
+  but notice on second run it will find attempts incremented so it will move it to failed_jobs straight away without execution again
+
+      ```json
+      {
+      "id": 101,
+      "queue": "default",
+      "payload": "{\"uuid\":\"9d1b54a2...\",\"displayName\":\"App\\\\Jobs\\\\TestJob\",\"job\":\"Illuminate\\\\Queue\\\\CallQueuedHandler@call\",\"data\":{...}}",
+      "attempts": 1,
+      "reserved_at": null,
+      "available_at": 1777812497,
+      "created_at": 1777812467
+      }
+      ```
+
+- if you called $this->release(30) and return with exception, it doesnt matter it will do same as above
+
+- using release
+
+  ```php
+      public function handle(): void
+      {
+          try {
+              $this->doSomeOperation();
+          } catch (\CustomException $ex) {
+              //in case this custom exception happened, then release and return
+              //so that it will be retried multiple times till attemps >= tries
+              Log::debug('Custom Exception is throwing from class and we will try again in few ' );
+              $this->release(30);
+              return;
+          } catch (\Throwable $th) {
+              //in case any other error, then fail the job into failed_jobs
+              $this->fail($th);
+          }
+      }
+  ```
+
+- so what is the difference between release and throwing exception as usual?
+  - on release, you have to end execution yourself and without `exit` since that will terminate queue:work process
+    best thing is to put it on handle method. while exception will end execution straight away
+  - on release, there won't be logging as execution is ending safely and you have to log error yourself.
+  - on release, you can delay next execution however you like but in exception you can't do that easily and you will have
+    to rely on backoff property value for this
 
 ## Configure Job Processing
 
@@ -95,13 +224,11 @@ class ProcessOrder implements ShouldQueue
 
 - you can also declare only delay when you are dispatching `SendEmailJob::dispatch($user)->delay(now()->addSeconds(30));`
 
-
 ### Run queue
 
 `php artisan queue:work` .. run queue
 
 Typially if job throw exception that wouldnt exit queue, but queue worker can crash though for multiple reasons .. to be safe its recommended to use supervisor to keep worker running always
-
 
 ### Process
 
@@ -114,7 +241,6 @@ Typially if job throw exception that wouldnt exit queue, but queue worker can cr
 
 Tip: if you dont want job to be moved to failed_jobs at all, you can on the job to try and catch and instead of throwing exception, you will catch the exception but instead of returning normally which means success job.. you will instead call $this->release($backoff); which will trigger `update job reserved_at = null and available_at = now + backoff`
 
-
 ### Failed Jobs
 
 Laravel does not touch Failed Jobs again unless you manually retry them. by moving them from failed jobs back to normal table
@@ -122,10 +248,10 @@ Laravel does not touch Failed Jobs again unless you manually retry them. by movi
 - `php artisan queue:retry {id}`
 - `php artisan queue:retry all`
 
-
 If you want failed jobs to be automatically retried
 
 - Option 1 — Use release() inside the job then job doesnt move to failed_jobs ever
+
 ```php
 
 public function handle()
@@ -207,9 +333,7 @@ class SendOrderEmail implements ShouldQueue
 
 Problem here.. you may have like 1000 email in the queue, while you have other background tasks which is more important.. but because its all on queue you have to wait for 1000 email to be sent for your other background task to be processed..
 
-
 Laravel doesn’t assign a priority number directly to jobs.
-
 
 Dispatching Jobs to Different Queues
 
@@ -229,16 +353,13 @@ Process Queues
 - `php artisan queue:work --queue=high,low` .. Worker will always check high first. If high is empty, it will process low.
 
 - you can work them separately
-    - `php artisan queue:work --queue=high --sleep=0 --tries=3`
-    - `php artisan queue:work --queue=low --sleep=5 --tries=1`
-
+  - `php artisan queue:work --queue=high --sleep=0 --tries=3`
+  - `php artisan queue:work --queue=low --sleep=5 --tries=1`
 
 👉 So, Laravel priority queues = multiple queues + ordered workers.
 There’s no “priority=10 vs priority=5” built-in — you achieve it by structuring queues.
 
-
 Tip: --sleep .. refer to if queue worker find queue empty.. then sleep for sometime before try again.. it helps a little then you dont hammer the queue if queue is empty
-
 
 ## can i use redis for queue?
 
@@ -259,6 +380,7 @@ Tip: --sleep .. refer to if queue worker find queue empty.. then sleep for somet
 ]
 
 ```
+
 This means Laravel will use the default Redis connection (from config/database.php).
 
 - config/database.php
@@ -269,22 +391,21 @@ This means Laravel will use the default Redis connection (from config/database.p
 
 ```json
 {
-    "uuid": "1531c3b3-87b8-4921-ac19-9fdc41aa3e93",
-    "displayName": "App\\\\Listeners\\\\SendWelcomeEmail",
-    "job": "Illuminate\\\\Queue\\\\CallQueuedHandler@call",
-    "maxTries": 5,
-    "maxExceptions": null,
-    "failOnTimeout": false,
-    "backoff": null,
-    "timeout": null,
-    "retryUntil": null,
-    "data": {
-        // job serialized        
-    },
-    "id": "mZQwJRmakeHHWnuxzPrbJBcWcv7anZl2",
-    "attempts": 0
+  "uuid": "1531c3b3-87b8-4921-ac19-9fdc41aa3e93",
+  "displayName": "App\\\\Listeners\\\\SendWelcomeEmail",
+  "job": "Illuminate\\\\Queue\\\\CallQueuedHandler@call",
+  "maxTries": 5,
+  "maxExceptions": null,
+  "failOnTimeout": false,
+  "backoff": null,
+  "timeout": null,
+  "retryUntil": null,
+  "data": {
+    // job serialized
+  },
+  "id": "mZQwJRmakeHHWnuxzPrbJBcWcv7anZl2",
+  "attempts": 0
 }
-
 ```
 
 - if you try to add a job with delay, it will be added to a sorted set called laravel_database_queues:default:delayed .. then it can use the score feature to quickly lookup what are the jobs that are ready now and can be processed. and if it finds jobs it will move them to the default list queue
@@ -293,11 +414,10 @@ This means Laravel will use the default Redis connection (from config/database.p
 
 - when job fails, it doesnt move to failed jobs in redis.. instead it send them to database .. its separately configured in config/queue.php on failed section and this because Laravel’s failed job mechanism is meant for persistent storage and easy inspection. and laravel doesnt provide failed jobs in redis out of the box. only databases
 
-
-
 ## Laravel Horizon
 
 horizon has two jobs
+
 - Supervisor: Keeps track of your defined worker configurations (config/horizon.php). Starts and restarts workers automatically.
 - Workers : Horizon spawns real queue:work processes behind the scenes — same code, just managed automatically.
 - UI to show you what is the progress of jobs
@@ -306,8 +426,6 @@ horizon has two jobs
 `php artisan horizon:install`
 `php artisan horizon`
 `https://localhost/horizon`
-
-
 
 ## Reserving Message
 
@@ -335,8 +453,7 @@ Q: why for reserving, reserving is done by flagging reserved_at instead of selec
 
 - to be generic, because select for update is only for databases and even it differ from database to another
 
-- also select for update is blocking, which may affect performance 
-
+- also select for update is blocking, which may affect performance
 
 ## Race Conditions
 
@@ -360,5 +477,3 @@ Worker B try to reserve `UPDATE jobs SET reserved_at = NOW(), attempts = attempt
 Worker A success and will get back affected_rows=1, so it will process. worker B will get back affected_rows=0, so it will try to go and find another job
 
 Tip: Databases Update are atomic, once you try to update it locks till it finish. so these two queries are guranteed they won't race as of database locking and redis is atomic as well as its single threaded anyway
-
-
