@@ -4,6 +4,14 @@
 
 // works as layers, object inside object inside object.. Each layer (decorator) assigns extra behaviors to object at runtime
 
+// decorator doesnt add or change to the origin object (component) public interface .. 
+// the original object decorator stays with same public methods, but its just adding extra behaviour then call the parent
+
+// typical decorator is not just only one decorator, typically would be multiple decorators and you would combine them 
+// however you like in runtime to add behavior dynamically.. if its just one decorator class then it is better to be called
+// another design pattern, maybe proxy or something else
+
+
 //- Component: the original object to be wrapped
 //- Decorator: wrapper
 
