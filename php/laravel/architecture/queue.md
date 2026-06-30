@@ -98,6 +98,8 @@ class SendWelcomeEmail implements ShouldQueue //ShouldQueue Interface “Don’t
 
 - if job failed with exception, it will move the record into failed_jobs table because by default tries = 1
 
+
+## tries
 - if job failed with exception but job had more trials declared with it. after it fails it will set reserved_at as null and keep attempts incremented
   till attempts >= trials then it will move it to failed_jobs
 
@@ -107,23 +109,17 @@ class SendWelcomeEmail implements ShouldQueue //ShouldQueue Interface “Don’t
       use Queueable;
 
       public $tries = 5;
+
+      public function tries(): int
+      {
+          return 5;
+      }
   }
   ```
 
-  ```json
-  {
-    "id": 101,
-    "queue": "default",
-    "payload": "{\"uuid\":\"9d1b54a2...\",\"displayName\":\"App\\\\Jobs\\\\TestJob\",\"job\":\"Illuminate\\\\Queue\\\\CallQueuedHandler@call\",\"data\":{...}}",
-    "attempts": 3,
-    "reserved_at": null,
-    "available_at": 1714742400,
-    "created_at": 1714742400
-  }
-  ```
+## backoff
 
-- if job failed with exception but job had more trials declared with it with back off. after exception happens, it mark reserved_at as null
-  and update available_at to respect backoff value
+- if backoff value, means next try should delay for some time, it mark reserved_at as null and update available_at to respect backoff value
 
   ```php
   class TestJob implements ShouldQueue
@@ -133,50 +129,63 @@ class SendWelcomeEmail implements ShouldQueue //ShouldQueue Interface “Don’t
       public $tries = 5;
 
       public $backoff = 30; //notice its backoff not backOff
-  }
-  ```
 
-  ```json
-  {
-    "id": 101,
-    "queue": "default",
-    "payload": "{\"uuid\":\"9d1b54a2...\",\"displayName\":\"App\\\\Jobs\\\\TestJob\",\"job\":\"Illuminate\\\\Queue\\\\CallQueuedHandler@call\",\"data\":{...}}",
-    "attempts": 1,
-    "reserved_at": null,
-    "available_at": 1777812497,
-    "created_at": 1777812467
-  }
-  ```
+      public $backoff = [10, 30, 60]; //or can be .. wait 10 then 30 then 60
 
-- if something fatal caused the queue:work process to exist such as below, reserved_at will have a value
-  and queue worker will use the value of retry_after in config/queue.php that after this time of reserving a job. worker will retry it
-  and notice because of this retry after functionality, its not desired that you have long running jobs
-  - server is down
-  - one of the jobs called `exit`
-  - one of the commands caused memory limit exception
-  - queue worker has lost connection to database
-  - Notice: this won't cause fatal exist of queue:work (typical exceptions and errors in jobs 1/0 or file syntax error )
-
-- if you called $this->release(30) and return normally. just by calling $this->release(30) it will action straight away
-  setting reserved_at with null and update available_at
-  but notice on second run it will find attempts incremented so it will move it to failed_jobs straight away without execution again
-
-      ```json
+      public function backoff(): int
       {
-      "id": 101,
-      "queue": "default",
-      "payload": "{\"uuid\":\"9d1b54a2...\",\"displayName\":\"App\\\\Jobs\\\\TestJob\",\"job\":\"Illuminate\\\\Queue\\\\CallQueuedHandler@call\",\"data\":{...}}",
-      "attempts": 1,
-      "reserved_at": null,
-      "available_at": 1777812497,
-      "created_at": 1777812467
+          return 30;
       }
-      ```
+  }
+  ```
 
-- if you called $this->release(30) and return with exception, it doesnt matter it will do same as above
+## delay
 
-- using release
+- if delay property is set means delay before first execution
 
+```php
+
+class ProcessOrder implements ShouldQueue
+{
+  public $delay = 60; //wait 60 seconds before first trial
+
+  public function withDelay(OrderShipped $event): int
+  {
+    return rand(0,60);
+  }
+}
+
+```
+
+## timeout
+
+-  If a job is processing for longer than the number of seconds specified by the timeout value, the worker processing the job will exit with an error.
+  - By default, the timeout value is 60 seconds
+  - IO blocking processes such as sockets or outgoing HTTP connections may not respect your specified timeout. Therefore, when using these features, you should always attempt to specify a timeout using their APIs as well. For example, when using Guzzle, you should always specify a connection and request timeout value.
+  - By default, when a job times out, it consumes one attempt and is released back to the queue (if retries are allowed). However, if you configure the job to fail on timeout, it will not be retried, regardless of the value set for tries.
+  - The $timeout property on a Laravel job doesn't work on Windows. only works on Linux (and macOS/Unix-based systems). 
+    - Laravel relies on a built-in PHP extension called PCNTL (Process Control) to handle job timeouts.
+    - When a job starts, Laravel uses PCNTL to configure a system alarm. If the alarm goes off before the job finishes, the operating system sends a signal (SIGALRM) to kill that specific background child process.
+    - The catch? The PCNTL extension is not available on Windows.
+
+```php
+class ProcessOrder implements ShouldQueue
+{
+  public $timeout = 120;
+}
+```
+
+note:
+- queue:work for laravel vapor is called VaporWorker.php and if timeout it will throw exception VaporJobTimedOutException
+
+
+## release
+
+- by calling $this->release(30) it will action straight away setting reserved_at with null and update available_at = now + 30 seconds
+  - its recommended to do it at the end of the exeuction because it doesnt make sense to do it on middle of execution
+  - if next run find attempts incremented so it will move it to failed_jobs straight away without execution again
+  - if you called $this->release(30) and return with exception, it doesnt matter it will do same as above
+      
   ```php
       public function handle(): void
       {
@@ -196,11 +205,29 @@ class SendWelcomeEmail implements ShouldQueue //ShouldQueue Interface “Don’t
   ```
 
 - so what is the difference between release and throwing exception as usual?
-  - on release, you have to end execution yourself and without `exit` since that will terminate queue:work process
-    best thing is to put it on handle method. while exception will end execution straight away
   - on release, there won't be logging as execution is ending safely and you have to log error yourself.
-  - on release, you can delay next execution however you like but in exception you can't do that easily and you will have
-    to rely on backoff property value for this
+  - on release, you can delay next execution however you like but in exception you will have to rely on backoff property value for this
+
+
+## retry_after in config
+
+- if something fatal caused the queue:work process to exist such as below, reserved_at will have a value
+  and queue worker will use the value of retry_after in config/queue.php that after this time of reserving a job. worker will retry it
+  and notice because of this retry after functionality, its not desired that you have long running jobs
+  - server is down
+  - one of the jobs called `exit`
+  - one of the commands caused memory limit exception
+  - queue worker has lost connection to database
+  - Notice: this won't cause fatal exist of queue:work (typical exceptions and errors in jobs 1/0 or file syntax error )
+
+
+- in sqs, it doesn't have this retry_after logic.. but it has something similar called Visibility Timeout
+  - The Visibility Timeout is the amount of time that Amazon SQS hides a message from other consumers after one consumer receives it. 
+  - it serve the same purpose as retry_after
+  - Visibility Timeout is not set on laravel config but its set on sqs aws itself
+  - in laravel vapor, you can set visibility timeout + lambda execution limit in vapor.yml by setting queue-timeout: 300
+
+
 
 ## Configure Job Processing
 
