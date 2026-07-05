@@ -17,7 +17,7 @@ Positional Encoding
 │
 ▼
 ────────────────────────────────────
-    Transformer Block Repeated N times (32 layers means repeated 32 times)
+  Transformer Block Repeated N times (32 layers means repeated 32 times)
 ────────────────────────────────────
 Self-Attention
 Residual
@@ -234,3 +234,133 @@ Don't focus on the exact numbers—they vary by architecture—but notice the pa
 Self-attention decides which information to gather from the other tokens.
 
 The Feed-Forward Network performs most of the heavy transformation of that information.
+
+---
+
+## Example using space
+
+prompt is `What is Docker?`
+
+- Step 0: Embedding lookup
+
+```
+                 y
+                 ↑
+
+            Docker ●
+
+What ●
+
+       is ●
+
+                  ? ●
+
+────────────────────────────────→ x
+```
+
+- Step 1 — Self-attention
+  - "What" attends to "is", "Docker", "?"
+  - "is" attends to "What", "Docker", "?"
+  - "Docker" attends to "What", "is", "?"
+  - "?" attends to all previous tokens.
+
+  Everyone exchanges information.
+
+Now every token moves.
+
+```
+
+                 y
+                 ↑
+
+          Docker₁ ×
+
+What₁ ×
+
+          is₁ ×
+
+                    ?₁ ×
+
+────────────────────────────────→ x
+
+```
+
+- Step 2 — FFN
+
+Now each token thinks independently.
+
+```
+
+                 y
+                 ↑
+
+             Docker₂ ×
+
+What₂ ×
+
+              is₂ ×
+
+                      ?₂ ×
+
+────────────────────────────────→ x
+
+```
+
+- Step 3 — Layer 2
+
+  Again:Self-attention. Everyone communicates again.
+
+```
+
+                 y
+                 ↑
+
+               Docker₃ ×
+
+What₃ ×
+
+                 is₃ ×
+
+                          ?₃ ×
+
+────────────────────────────────→ x
+```
+
+Now the question mark has learned a lot.
+
+It has repeatedly attended to:
+
+What
+is
+Docker
+
+Its representation is no longer "punctuation."
+
+- After 30+ layers
+
+```
+
+                 y
+                 ↑
+
+              Docker₃₂ ×
+
+What₃₂ ×
+
+               is₃₂ ×
+
+                           ?₃₂ ×
+
+────────────────────────────────→ x
+
+```
+
+- Which one predicts the next token?
+
+  Only the last token. Not because the others are useless. Because the ? vector has absorbed information from all previous tokens.
+  - "What" → ignored
+  - "is" → ignored
+  - "Docker" → ignored
+  - "?" → used
+
+vector is last token is used and do comparsion with each of the vocabulary in the model and see which word is probably more to be the next word then do it again
